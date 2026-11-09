@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SMITE 2 Ping
+Comment=Показать/скрыть пинг SMITE 2 (F8)
+Exec=python3 "/mnt/games/SteamLibrary/steamapps/common/SMITE 2/PingOverlay/smite2_ping.py"
+Icon=network-wireless
+Terminal=false
+NoDisplay=false

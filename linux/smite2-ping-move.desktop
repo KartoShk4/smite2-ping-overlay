@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=SMITE 2 Ping — переместить
+Exec=python3 "/mnt/games/SteamLibrary/steamapps/common/SMITE 2/PingOverlay/smite2_ping.py" --move
+Icon=transform-move
+Terminal=false
+NoDisplay=true
