@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SMITE 2 Ping Overlay: F8 показывает/прячет пинг до игрового сервера.
 Отдельная программа, в игру ничего не встраивает. Плашку можно двигать мышкой."""
-import os, sys, signal, subprocess, re, json, threading
+import os, sys, signal, subprocess, re, json, threading, time
 import psutil
 
 RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
@@ -26,14 +26,43 @@ def toggle_existing():
     return False
 
 
+# Кэш PID игры: дешёвая проверка, полный скан процессов не чаще раза в ~5 с.
+_game = {"pid": None, "next_scan": 0.0}
+
+
 def game_running():
-    for p in psutil.process_iter(["cmdline"]):
+    now = time.monotonic()
+    pid = _game["pid"]
+    if pid is not None:
+        try:
+            p = psutil.Process(pid)
+            if p.is_running() and "Hemingway" in " ".join(p.cmdline()):
+                return True
+        except (psutil.Error, OSError):
+            pass
+        _game["pid"] = None
+    if now < _game["next_scan"]:
+        return False
+    _game["next_scan"] = now + 5.0
+    for p in psutil.process_iter(["pid", "cmdline"]):
         if "Hemingway" in " ".join(p.info["cmdline"] or []):
+            _game["pid"] = p.info["pid"]
             return True
     return False
 
 
 _log = {"ino": None, "pos": 0, "last": None, "rest": ""}
+
+
+def _classify_browse(last):
+    if not last:
+        return None, "нет матча"
+    ip = IP_RE.match(last)
+    if ip:
+        return ip.group(1), None
+    if "Standalone" in last:
+        return None, "оффлайн-режим"
+    return None, "нет матча"
 
 
 def find_server():
@@ -45,6 +74,9 @@ def find_server():
         st = os.stat(GAME_LOG)
         if st.st_ino != _log["ino"] or st.st_size < _log["pos"]:
             _log.update(ino=st.st_ino, pos=0, last=None, rest="")
+        elif st.st_size == _log["pos"]:
+            # файл не изменился — ничего не открываем
+            return _classify_browse(_log["last"])
         with open(GAME_LOG, "rb") as f:
             f.seek(_log["pos"])
             chunk = f.read()
@@ -55,25 +87,27 @@ def find_server():
     text, _, _log["rest"] = text.rpartition("\n")
     for m in BROWSE_RE.finditer(text):
         _log["last"] = m.group(1)
-    last = _log["last"]
-    if not last:
-        return None, "нет матча"
-    ip = IP_RE.match(last)
-    if ip:
-        return ip.group(1), None
-    if "Standalone" in last:
-        return None, "оффлайн-режим"
-    return None, "нет матча"
+    return _classify_browse(_log["last"])
+
+
+_iface = {"name": None, "until": 0.0}
 
 
 def physical_iface():
-    """Сетевая карта с обычным маршрутом в интернет (не VPN)."""
+    """Сетевая карта с обычным маршрутом в интернет (не VPN). Кэш ~20 с."""
+    now = time.monotonic()
+    if _iface["name"] is not None and now < _iface["until"]:
+        return _iface["name"]
     out = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True).stdout
+    name = None
     for line in out.splitlines():
         m = re.search(r"via \S+ dev (\S+)", line)
         if m:
-            return m.group(1)
-    return None
+            name = m.group(1)
+            break
+    _iface["name"] = name
+    _iface["until"] = now + 20.0
+    return name
 
 
 def vpn_active():
@@ -147,7 +181,6 @@ def main():
     open(PIDFILE, "w").write(str(os.getpid()))
     app = QApplication(sys.argv)
     signal.signal(signal.SIGTERM, lambda *a: app.quit())
-    keepalive = QTimer(); keepalive.start(200); keepalive.timeout.connect(lambda: None)
 
     class Badge(QLabel):
         """Плашка с пингом, которую можно таскать мышкой."""
@@ -187,6 +220,13 @@ def main():
         lbl.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def update():
+        running = game_running()
+        # в игре — раз в 2 с, без игры — раз в 5 с (сон)
+        want = 2000 if running else 5000
+        if t.interval() != want:
+            t.setInterval(want)
+        if not running:
+            return set_text("Ping: — (игра не запущена)")
         ip, err = find_server()
         if not ip:
             return set_text(f"Ping: — ({err})")
@@ -196,11 +236,13 @@ def main():
             threading.Thread(target=target_for, args=(ip, iface), daemon=True).start()
             return
         ms = None
-        for hop in _hop_cache[ip]:
+        hops = _hop_cache.get(ip) or []
+        for hop in list(hops):
             ms = ping(hop, iface)
             if ms is not None:
-                hops = _hop_cache[ip]  # отвечающий узел ставим первым, чтобы не ждать молчащие
-                hops.remove(hop); hops.insert(0, hop)
+                # отвечающий узел ставим первым, чтобы не ждать молчащие
+                if hop in hops:
+                    hops.remove(hop); hops.insert(0, hop)
                 break
         if ms is None:
             state["miss"] = state.get("miss", 0) + 1
@@ -225,7 +267,10 @@ def main():
 
     moves = []
     signal.signal(signal.SIGUSR1, lambda *a: moves.append(1))
-    mv = QTimer(); mv.timeout.connect(lambda: (moves.clear(), cycle_pos()) if moves else None); mv.start(100)
+    # один тикер вместо keepalive 200 мс + move 100 мс
+    tick = QTimer()
+    tick.timeout.connect(lambda: (moves.clear(), cycle_pos()) if moves else None)
+    tick.start(250)
 
     state = {"game": True}
 
@@ -263,7 +308,7 @@ def main():
     lbl.move(*load_pos())
     lbl.show()
     load_kwin_script()
-    t = QTimer(); t.timeout.connect(update); t.start(1000); update()
+    t = QTimer(); t.timeout.connect(update); t.start(2000); update()
     try:
         app.exec_()
     finally:

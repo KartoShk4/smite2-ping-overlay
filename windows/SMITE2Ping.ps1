@@ -621,8 +621,15 @@ try {
     })
 
     $pingTimer = New-Object System.Windows.Forms.Timer
-    $pingTimer.Interval = 1000
-    $pingTimer.add_Tick({ try { Update-Ping } catch { Write-ErrLog $_ } })
+    $pingTimer.Interval = 2000
+    $pingTimer.add_Tick({
+        try {
+            Update-Ping
+            # в игре — раз в 2 с, иначе сон ~5 с (меньше просыпаний таймера)
+            $want = if ($S.Enabled -and $S.GameFg) { 2000 } else { 5000 }
+            if ($pingTimer.Interval -ne $want) { $pingTimer.Interval = $want }
+        } catch { Write-ErrLog $_ }
+    })
 
     $focusTimer.Start()
     $pingTimer.Start()
